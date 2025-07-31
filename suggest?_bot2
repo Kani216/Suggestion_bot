@@ -1,0 +1,180 @@
+import os
+import asyncio
+import sqlite3
+import uuid
+import random
+import re
+from google.generativeai import GenerativeModel
+import google.generativeai as genai
+from google.colab import userdata
+
+# Configure Gemini API
+GEMINI_API_KEY = userdata.get("GOOGLE_API_KEY")
+genai.configure(api_key=GEMINI_API_KEY)
+
+# Initialize SQLite database for contacts
+def init_db():
+    conn = sqlite3.connect("contacts.db")
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS contacts (
+            id TEXT PRIMARY KEY,
+            first_name TEXT NOT NULL,
+            last_name TEXT NOT NULL,
+            phone TEXT,
+            email TEXT,
+            address TEXT,
+            note TEXT
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+# Model 1: Casual Conversation using Gemini API
+async def model1_casual_conversation(query):
+    model = GenerativeModel("gemini-1.5-flash")
+    try:
+        response = await asyncio.to_thread(model.generate_content, query)
+        return response.text
+    except Exception as e:
+        return f"Oops, something went wrong with the conversation: {str(e)}"
+
+# Model 2: Weather Queries (Dynamic Mock API)
+async def model2_weather(query):
+    # Weather conditions for mock responses
+    conditions = ["Sunny", "Cloudy", "Rainy", "Snowy", "Windy", "Foggy"]
+
+    # Extract location using regex to find proper nouns or phrases after weather-related words
+    location_pattern = re.compile(r"(?:weather|temperature|forecast|how's it)\s+(?:in|at|for)?\s*([A-Z][a-zA-Z\s]+)", re.IGNORECASE)
+    match = location_pattern.search(query)
+    location = match.group(1).strip() if match else None
+
+    if not location:
+        return "Sorry, I couldn't identify a location in your query. Please specify a city or place (e.g., 'weather in Paris')."
+
+    # Generate mock weather data
+    temperature = random.randint(-10, 40)  # Random temp between -10°C and 40°C
+    condition = random.choice(conditions)
+    humidity = random.randint(30, 90)  # Random humidity between 30% and 90%
+
+    return f"{location}: {condition}, {temperature}°C, {humidity}% humidity"
+
+# Model 3: Contact Management
+class ContactManager:
+    def __init__(self):
+        self.conn = sqlite3.connect("contacts.db")
+        self.cursor = self.conn.cursor()
+
+    async def add_contact(self):
+        print("Please provide contact details:")
+        first_name = input("First Name: ").strip()
+        last_name = input("Last Name: ").strip()
+        email = input("Email: ").strip()
+        phone = input("Phone: ").strip()
+        address = input("Address: ").strip()
+        note = input("Note: ").strip()
+
+        if not first_name or not last_name:
+            return "First name and last name are required."
+
+        contact_id = str(uuid.uuid4())
+        self.cursor.execute(
+            "INSERT INTO contacts (id, first_name, last_name, phone, email, address, note) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (contact_id, first_name, last_name, phone, email, address, note)
+        )
+        self.conn.commit()
+        return f"Contact added with ID: {contact_id}"
+
+    async def update_contact(self, contact_name):
+        self.cursor.execute(
+            "SELECT id, first_name, last_name FROM contacts WHERE lower(first_name || ' ' || last_name) = lower(?)",
+            (contact_name,)
+        )
+        contact = self.cursor.fetchone()
+        if not contact:
+            return f"No contact found with name: {contact_name}"
+
+        contact_id = contact[0]
+        while True:
+            print(f"Updating contact: {contact[1]} {contact[2]}")
+            valid_fields = ["first_name", "last_name", "phone", "email", "address", "note"]
+            field = input(f"Which field to update? ({', '.join(valid_fields)}): ").strip().lower()
+            if field not in valid_fields:
+                print(f"Invalid field. Choose from: {', '.join(valid_fields)}")
+                continue
+            value = input(f"New value for {field}: ").strip()
+            self.cursor.execute(f"UPDATE contacts SET {field} = ? WHERE id = ?", (value, contact_id))
+            self.conn.commit()
+            print(f"Updated {field} for contact {contact_name}")
+
+            further = input("Do you want to make further updates to this contact? (yes/no): ").strip().lower()
+            if further != "yes":
+                break
+        return f"Finished updating contact: {contact_name}"
+
+    async def list_contacts(self):
+        self.cursor.execute("SELECT id, first_name, last_name FROM contacts")
+        contacts = self.cursor.fetchall()
+        if not contacts:
+            return "No contacts found."
+        return "\n".join([f"ID: {c[0]}, Name: {c[1]} {c[2]}" for c in contacts])
+
+    def close(self):
+        self.conn.close()
+
+# Intent Router
+def classify_intent(query):
+    query = query.lower()
+    if any(word in query for word in ["weather", "temperature", "forecast", "how's it"]):
+        return "weather"
+    elif any(word in query for word in ["add contact", "update contact", "list contact"]):
+        return "contact"
+    else:
+        return "casual"
+
+# Main Agent Logic
+async def agent(query):
+    intent = classify_intent(query)
+    if intent == "casual":
+        return await model1_casual_conversation(query)
+    elif intent == "weather":
+        return await model2_weather(query)
+    elif intent == "contact":
+        contact_manager = ContactManager()
+        try:
+            if "add contact" in query.lower():
+                result = await contact_manager.add_contact()
+                return result
+            elif "update contact" in query.lower():
+                parts = query.split()
+                if len(parts) >= 3:
+                    contact_name = " ".join(parts[2:])
+                    result = await contact_manager.update_contact(contact_name)
+                    return result
+                return "Please provide the contact name to update (e.g., 'update contact John Doe')."
+            elif "list contact" in query.lower():
+                result = await contact_manager.list_contacts()
+                return result
+            else:
+                return "Invalid contact command. Use 'add contact', 'update contact <name>', or 'list contact'."
+        finally:
+            contact_manager.close()
+    return "Sorry, I didn't understand the query."
+
+# Command-line interface for testing
+async def main():
+    # Delete existing database file if it exists
+    if os.path.exists("contacts.db"):
+        os.remove("contacts.db")
+
+    init_db()
+    print("Agent is running. Type 'exit' to quit.")
+    while True:
+        query = input("Enter your query: ")
+        if query.lower() == "exit":
+            break
+        response = await agent(query)
+        print("Response:", response)
+
+# Run in Colab
+await main()
