@@ -1,0 +1,43 @@
+import os
+from typing import Dict, Any, Annotated
+from dataclasses import dataclass
+from langgraph.graph import StateGraph, START, END
+from langgraph.graph.message import add_messages
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.messages import HumanMessage, SystemMessage
+
+# Set your Gemini API key here
+os.environ["GOOGLE_API_KEY"] = ""  # Replace with your provided API key
+
+# Define the state to track conversation
+@dataclass
+class AgentState:
+    messages: Annotated[list, add_messages]
+    context: str = ""
+
+class ConversationalAgent:
+    def __init__(self):
+        self.llm = ChatGoogleGenerativeAI(
+            model="gemini-1.5-flash",  # Using a valid model
+            temperature=0.7
+        )
+        self.graph = self._build_graph()
+
+    def _build_graph(self) -> StateGraph:
+        workflow = StateGraph(AgentState)
+        workflow.add_node("chatbot", self._chatbot_node)
+        workflow.add_edge(START, "chatbot")
+        workflow.add_edge("chatbot", END)
+        return workflow.compile()
+
+    def _chatbot_node(self, state: AgentState) -> Dict[str, Any]:
+        system_msg = SystemMessage(content="You are a helpful AI assistant powered by Gemini. Provide accurate and concise answers.")
+        messages = [system_msg] + state.messages
+        response = self.llm.invoke(messages)
+        updated_context = state.context + f"\nUser: {messages[-1].content}\nAssistant: {response.content}"
+        return {"messages": [response], "context": updated_context}
+
+    def run(self, query: str) -> str:
+        try:
+            state = self.graph.invoke({"messages": [HumanMessage(content=query)], "context": ""})
+            return state["messages"][-1].content
